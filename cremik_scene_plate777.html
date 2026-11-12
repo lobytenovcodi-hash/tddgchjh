@@ -102,8 +102,8 @@ const SHAKE = {
   roll:  [[4, 0.0010, 1.1], [9, 0.0005, 3.7], [23, 0.0002, 0.4]],
 };
 // lightning events inside the loop: t (s), power, bolt index (-1 = flash inside clouds only),
-// flash direction. Bolts sit in the open sky right of the towers, so they strike while the
-// camera holds the default framing; the flash at the plate lights the car from the front.
+// flash direction. Bolts strike while the camera holds the default framing; the flash at the
+// plate lights the car from the front.
 const STRIKES = [
   { t: 0.55, p: 0.45, bolt: -1, dir: 0 },
   { t: 0.9, p: 1.0, bolt: 0, dir: 0 },
@@ -113,14 +113,26 @@ const STRIKES = [
   { t: 5.0, p: 0.75, bolt: -1, dir: 2 },
   { t: 5.13, p: 0.4, bolt: -1, dir: 2 },
   { t: 7.4, p: 0.45, bolt: -1, dir: 0 },
-  { t: 9.0, p: 1.0, bolt: 1, dir: 1 },
-  { t: 9.12, p: 0.65, bolt: 1, dir: 1 },
-  { t: 9.36, p: 0.4, bolt: 1, dir: 1 },
+  { t: 9.0, p: 1.0, bolt: 1, dir: 0 },
+  { t: 9.12, p: 0.65, bolt: 1, dir: 0 },
+  { t: 9.36, p: 0.4, bolt: 1, dir: 0 },
 ];
-const FLASH_DIRS = [
+const DEG = Math.PI / 180;
+// bolts: azimuth (deg, from -Z toward +X), top / bottom elevation (deg), shape seed, horizontal
+// squeeze. In the square framing the open sky is the slot between the brick building and the
+// first tower, so both bolts strike there; the shapes are picked to stay inside it.
+const BOLTS = [
+  { az: 2, top: 60, bottom: 8, seed: 9393, spread: 0.18 },
+  { az: 1, top: 60, bottom: 8, seed: 5791, spread: 0.25 },
+];
+const skyDir = (az, el) => new THREE.Vector3(Math.sin(az * DEG) * Math.cos(el * DEG), Math.sin(el * DEG), -Math.cos(az * DEG) * Math.cos(el * DEG));
+// where each flash lights up the clouds: 0 = the bolt slot, 1 = beyond the towers, 2 = behind the camera
+const FLASH_DIRS = [skyDir(1.5, 35), new THREE.Vector3(0.668, 0.407, -0.623).normalize(), new THREE.Vector3(-0.55, 0.6, 0.58).normalize()];
+// where the strike light comes from: high on the right, so the flash reaches the facade and the car
+const FLASH_LIGHT_DIRS = [
   new THREE.Vector3(0.647, 0.423, -0.635).normalize(),
   new THREE.Vector3(0.668, 0.407, -0.623).normalize(),
-  new THREE.Vector3(-0.55, 0.6, 0.58).normalize(),
+  FLASH_DIRS[2],
 ];
 // short glitch bursts on top of the constant faint RGB split: t (s), length (s), power
 const GLITCHES = [
@@ -343,7 +355,7 @@ scene.add(fill);
 // lightning: cold key light from the strike direction, intensity driven by the timeline
 const hemi = scene.children.find(o => o.isHemisphereLight);
 const strikeLight = new THREE.DirectionalLight(0xd2deff, 0);
-strikeLight.position.copy(FLASH_DIRS[0]).multiplyScalar(60);
+strikeLight.position.copy(FLASH_LIGHT_DIRS[0]).multiplyScalar(60);
 scene.add(strikeLight);
 
 // soft fresnel rim on top of the PBR lighting; brightens with lightning
@@ -1009,7 +1021,7 @@ addMist(9, 2, -20, 18, 0.3); addMist(18, 5, -32, 26, 0.3);
 /* =====================================================================
    Lightning bolts (far billboards, HDR so bloom gives the glow)
    ===================================================================== */
-function boltGeometry(boltSeed, H) {
+function boltGeometry(boltSeed, H, spread = 1) {
   let s = boltSeed;
   const rand = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
   const pos = [], uv = [], glow = [], idx = [];
@@ -1022,6 +1034,7 @@ function boltGeometry(boltSeed, H) {
     return l.slice(0, -1).concat(path(m, b, rough, depth - 1));
   }
   function ribbon(pts, w0, w1, g0, g1) {
+    pts = pts.map(([x, y]) => [x * spread, y]);
     for (let i = 0; i < pts.length - 1; i++) {
       const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
       const k0 = i / (pts.length - 1), k1 = (i + 1) / (pts.length - 1);
@@ -1050,8 +1063,7 @@ function boltGeometry(boltSeed, H) {
   geo.setIndex(idx);
   return geo;
 }
-// seeds chosen so the main channel crosses the open sky right of the towers in the default framing
-const bolts = [[FLASH_DIRS[0], 6802], [FLASH_DIRS[1], 2468]].map(([dir, sd]) => {
+const bolts = BOLTS.map(b => {
   const mat = new THREE.ShaderMaterial({
     uniforms: { uI: { value: 0 } },
     vertexShader: /* glsl */`
@@ -1067,10 +1079,11 @@ const bolts = [[FLASH_DIRS[0], 6802], [FLASH_DIRS[1], 2468]].map(([dir, sd]) => 
       }`,
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
   });
-  const mesh = new THREE.Mesh(boltGeometry(sd, 470), mat);
-  // top just above the frame, lower part behind the podium
-  mesh.position.set(dir.x, 0, dir.z).normalize().multiplyScalar(900).setY(490);
-  mesh.lookAt(0, mesh.position.y, 0);
+  // enters from above the frame; the lower end hides behind the podium
+  const D = 900, yTop = D * Math.tan(b.top * DEG);
+  const mesh = new THREE.Mesh(boltGeometry(b.seed, yTop - D * Math.tan(b.bottom * DEG), b.spread), mat);
+  mesh.position.set(Math.sin(b.az * DEG) * D, yTop, -Math.cos(b.az * DEG) * D);
+  mesh.lookAt(0, yTop, 0);
   mesh.frustumCulled = false;
   mesh.visible = false;
   scene.add(mesh);
@@ -1146,7 +1159,7 @@ const grade = new ShaderPass({
       d.x *= uRes.x / uRes.y;
       // the vignette opens up while lightning flashes, so a strike in the corner reads
       c *= mix(mix(0.55, 1.0, smoothstep(0.95, 0.3, length(d))), 1.0, 0.5 * uFlash);
-      c += (rnd(vUv * uRes + fract(uTime) * 91.0) - 0.5) * 0.022;
+      c += (rnd(floor(vUv * uRes) + fract(uTime) * 91.0) - 0.5) * 0.022;   // grain per output pixel, also when supersampled
       gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
     }`,
 });
@@ -1195,6 +1208,7 @@ function cameraAt(t) {
 function onResize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
+  if (RENDER_MODE) bloom.setSize(window.innerWidth, window.innerHeight);
   const dpr = renderer.getPixelRatio();
   mirror.getRenderTarget().setSize(window.innerWidth * dpr * 0.5, window.innerHeight * dpr * 0.5);
   grade.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
@@ -1255,7 +1269,7 @@ function renderAt(t) {
   const di = L.dir.indexOf(Math.max(...L.dir));
   skyUniforms.uFlash.value = f;
   skyUniforms.uFlashDir.value.copy(FLASH_DIRS[di]);
-  strikeLight.position.copy(FLASH_DIRS[di]).multiplyScalar(60);
+  strikeLight.position.copy(FLASH_LIGHT_DIRS[di]).multiplyScalar(60);
   strikeLight.intensity = f * 2.4;
   hemi.intensity = baseHemi + f * 0.45;
   scene.environmentIntensity = baseEnv + f * 0.3;
@@ -1273,7 +1287,27 @@ function renderAt(t) {
 }
 
 if (RENDER_MODE) {
-  // frame-exact capture: the page renders only when asked
+  // frame-exact capture: the page renders only when asked. Capturing at devicePixelRatio 2
+  // gives a supersampled frame: passes run at full resolution, bloom at output resolution so
+  // the glow matches a 1x frame
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloom.setSize(window.innerWidth, window.innerHeight);
+  if (renderer.getPixelRatio() > 1) {
+    // bloom reads a box-filtered copy at output resolution: sampling the full-size frame
+    // directly skips texels, which dims thin bright lines such as the bolts
+    const bloomSrc = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, { type: THREE.HalfFloatType });
+    const down = new ShaderPass({
+      uniforms: { tDiffuse: { value: null } },
+      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `uniform sampler2D tDiffuse; varying vec2 vUv; void main(){ gl_FragColor = texture2D(tDiffuse, vUv); }`,
+    });
+    Object.defineProperty(bloom.highPassUniforms.tDiffuse, 'value', { get: () => bloomSrc.texture, set() {} });
+    const bloomRender = bloom.render.bind(bloom);
+    bloom.render = (r, w, rb, dt, mask) => { down.render(r, bloomSrc, rb); bloomRender(r, w, rb, dt, mask); };
+  }
+  // nothing that casts shadows moves: draw the shadow map once
+  renderer.shadowMap.autoUpdate = false;
+  renderer.shadowMap.needsUpdate = true;
   window.__renderFrame = t => { renderAt(t); return true; };
   renderAt(0); renderAt(0);
   document.body.dataset.ready = '1'; document.getElementById('loading').remove();
