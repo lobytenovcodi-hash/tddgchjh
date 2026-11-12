@@ -48,8 +48,8 @@
 <div id="hint">пробел — пауза · мышь — свободная камера · колесо — зум · ПКМ — сдвиг · R — исходный ракурс</div>
 <div id="bar">
   <button id="play" title="пробел">❚❚</button>
-  <input id="scrub" type="range" min="0" max="8" step="0.001" value="0" />
-  <span id="time">0.00 / 8.00</span>
+  <input id="scrub" type="range" min="0" max="10" step="0.001" value="0" />
+  <span id="time">0.00 / 10.00</span>
   <button id="mode" class="on" title="анимация камеры / свободная камера">🎬 анимация</button>
   <button id="copy" title="скопировать текущий ракурс (для правок)">📋 ракурс</button>
 </div>
@@ -84,32 +84,51 @@ const CASE_SPOT = [2.2, 8.4];                    // hood position in the car mod
 const CASE_YAW_OFFSET = 0;
 
 /* =====================================================================
-   Timeline: 8 s camera move + lightning. `?render` = frame-by-frame capture mode
+   Timeline: 10 s loop — default framing, slow push-in on the front plate and back,
+   lightning, faint glitch. `?render` = frame-by-frame capture mode
    ===================================================================== */
-const DURATION = 8;
+const DURATION = 10;
 const RENDER_MODE = new URLSearchParams(location.search).has('render');
 if (RENDER_MODE) document.body.classList.add('render');
-// camera keyframes: position + look-at target, interpolated along smooth curves
-const CAM_KEYS = [
-  { pos: [-2.0, 0.42, -0.45], target: [-0.35, 0.8, -3.6] },
-  { pos: [-1.3, 0.75, 0.85], target: [-0.4, 1.45, -4.8] },
-  { pos: [0, 1.05, 0], target: [-0.3, 2.56, -7.76] },
-];
-// lightning events inside the 8 s loop: t (s), power, bolt index (-1 = flash inside clouds only)
+// camera views: position + look-at target + lens zoom (same format as the 📋 button)
+const CAM_HOME  = { pos: [0, 1.05, 0], target: [-0.3, 2.56, -7.76], zoom: 1 };
+const CAM_PLATE = { pos: [-1.06, 0.85, -0.68], target: [-1.28, 0.61, -2.07], zoom: 1.15 };
+const CAM_MOVE  = { in: [1.4, 4.6], out: [5.4, 8.6] };     // s: push in on the plate, then back home
+// barely-there handheld shake, radians: [cycles per loop, amplitude, phase];
+// whole cycles per loop keep the loop seamless
+const SHAKE = {
+  yaw:   [[6, 0.0012, 0.3], [13, 0.0007, 1.9], [27, 0.0004, 4.1], [53, 0.0002, 2.6]],
+  pitch: [[5, 0.0011, 2.2], [11, 0.0006, 0.7], [29, 0.0004, 5.3], [47, 0.0002, 1.2]],
+  roll:  [[4, 0.0010, 1.1], [9, 0.0005, 3.7], [23, 0.0002, 0.4]],
+};
+// lightning events inside the loop: t (s), power, bolt index (-1 = flash inside clouds only),
+// flash direction. Bolts sit in the open sky right of the towers, so they strike while the
+// camera holds the default framing; the flash at the plate lights the car from the front.
 const STRIKES = [
-  { t: 1.15, p: 0.55, bolt: -1, dir: 1 },
-  { t: 2.6, p: 1.0, bolt: 0, dir: 0 },
-  { t: 2.74, p: 0.65, bolt: 0, dir: 0 },
-  { t: 2.95, p: 0.35, bolt: 0, dir: 0 },
-  { t: 4.7, p: 0.45, bolt: -1, dir: 2 },
-  { t: 6.15, p: 1.0, bolt: 1, dir: 1 },
-  { t: 6.27, p: 0.7, bolt: 1, dir: 1 },
-  { t: 6.5, p: 0.45, bolt: 1, dir: 1 },
+  { t: 0.55, p: 0.45, bolt: -1, dir: 0 },
+  { t: 0.9, p: 1.0, bolt: 0, dir: 0 },
+  { t: 1.03, p: 0.7, bolt: 0, dir: 0 },
+  { t: 1.24, p: 0.45, bolt: 0, dir: 0 },
+  { t: 3.3, p: 0.5, bolt: -1, dir: 1 },
+  { t: 5.0, p: 0.75, bolt: -1, dir: 2 },
+  { t: 5.13, p: 0.4, bolt: -1, dir: 2 },
+  { t: 7.4, p: 0.45, bolt: -1, dir: 0 },
+  { t: 9.0, p: 1.0, bolt: 1, dir: 1 },
+  { t: 9.12, p: 0.65, bolt: 1, dir: 1 },
+  { t: 9.36, p: 0.4, bolt: 1, dir: 1 },
 ];
 const FLASH_DIRS = [
-  new THREE.Vector3(0.85, 0.62, -0.45).normalize(),
-  new THREE.Vector3(0.6, 0.7, -0.7).normalize(),
-  new THREE.Vector3(1.0, 0.45, -0.35).normalize(),
+  new THREE.Vector3(0.647, 0.423, -0.635).normalize(),
+  new THREE.Vector3(0.668, 0.407, -0.623).normalize(),
+  new THREE.Vector3(-0.55, 0.6, 0.58).normalize(),
+];
+// short glitch bursts on top of the constant faint RGB split: t (s), length (s), power
+const GLITCHES = [
+  { t: 1.6, d: 0.1, p: 0.5 },
+  { t: 2.95, d: 0.07, p: 0.35 },
+  { t: 4.25, d: 0.12, p: 0.45 },
+  { t: 6.1, d: 0.06, p: 0.3 },
+  { t: 7.85, d: 0.1, p: 0.4 },
 ];
 
 /* =====================================================================
@@ -166,7 +185,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'hi
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.25;
+renderer.toneMappingExposure = 1.0;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
@@ -185,7 +204,7 @@ function tex(canvas, { srgb = true, repeat = null, wrap = false } = {}) {
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b1220);
-scene.fog = new THREE.FogExp2(0x1f2c48, 0.0088);
+scene.fog = new THREE.FogExp2(0x1b263f, 0.0088);
 
 const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 4000);
 camera.position.copy(CAM_POS);
@@ -240,8 +259,8 @@ const SKY_FS = /* glsl */`
   void main() {
     vec3 d = normalize(vDir);
     float h = d.y;
-    vec3 zen = vec3(0.008, 0.012, 0.03);
-    vec3 hor = vec3(0.075, 0.11, 0.2);
+    vec3 zen = vec3(0.006, 0.01, 0.025);
+    vec3 hor = vec3(0.062, 0.09, 0.165);
     vec3 col = mix(hor, zen, smoothstep(-0.05, 0.8, h));
     float g  = max(dot(d, normalize(uGlowDir)), 0.0);
     float g2 = max(dot(d, normalize(uGlowDir2)), 0.0);
@@ -253,12 +272,12 @@ const SKY_FS = /* glsl */`
     float detail = fbm(q * 3.1 + vec3(-uTime * 0.02, 0.0, 0.0));
     float dens = smoothstep(0.32, 0.7, base * 0.75 + detail * 0.4);
     float lit = clamp(pow(g, 3.0) * 1.8 + pow(g2, 3.0) * 1.2 + (detail - 0.45) * 1.2 + h * 0.15, 0.0, 1.0);
-    vec3 cloud = mix(vec3(0.016, 0.024, 0.05), vec3(0.5, 0.6, 0.82), lit * lit);
+    vec3 cloud = mix(vec3(0.013, 0.02, 0.042), vec3(0.43, 0.52, 0.72), lit * lit);
     // lightning: clouds glow from inside around the strike, the whole sky lifts a little
     float gf = max(dot(d, uFlashDir), 0.0);
-    float inner = uFlash * (pow(gf, 14.0) * 1.1 + pow(gf, 4.0) * 0.35 + 0.05);
-    cloud += vec3(0.62, 0.72, 1.0) * inner * (0.35 + detail * 0.9);
-    col += vec3(0.35, 0.45, 0.8) * uFlash * (pow(gf, 6.0) * 0.3 + 0.03);
+    float inner = uFlash * (pow(gf, 12.0) * 0.15 + pow(gf, 4.0) * 0.15 + 0.06);
+    cloud += vec3(0.62, 0.72, 1.0) * inner * (0.35 + detail * 1.0);
+    col += vec3(0.35, 0.45, 0.8) * uFlash * (pow(gf, 5.0) * 0.12 + 0.04);
     col = mix(col, cloud, dens * 0.93 * smoothstep(-0.02, 0.12, h));
     gl_FragColor = vec4(col, 1.0);
   }`;
@@ -294,14 +313,14 @@ scene.add(sky);
   const haze = new THREE.Mesh(new THREE.PlaneGeometry(50, 18), new THREE.MeshBasicMaterial({ color: new THREE.Color(0.22, 0.3, 0.48) }));
   haze.position.set(30, 6, -40); haze.lookAt(0, 1, 0); env.add(haze);
   scene.environment = pmrem.fromScene(env, 0.025).texture;
-  scene.environmentIntensity = 0.85;
+  scene.environmentIntensity = 0.78;
   pmrem.dispose();
 }
 
 /* =====================================================================
    Lights
    ===================================================================== */
-scene.add(new THREE.HemisphereLight(0x5a6f9e, 0x0b0e16, 0.8));
+scene.add(new THREE.HemisphereLight(0x5a6f9e, 0x0b0e16, 0.72));
 
 const moon = new THREE.DirectionalLight(0xb2c4ec, 2.6);
 moon.position.set(14, 30, 12);
@@ -843,8 +862,107 @@ manGltf.scene.traverse(o => {
 
 
 // --- briefcase on the hood
+// The GLB has no textures or UVs, only vertex colours (pale bundles with yellow straps,
+// brown shell) under one shiny material, so the cash read as blank white blocks.
+// Each part gets its own material and the bundles get a printed banknote.
+function banknoteTexture() {
+  let s = 20231;                                   // own RNG: the scene's rnd() sequence stays as it was
+  const rand = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
+  return tex(makeCanvas(512, 218, (g, W, H) => {
+    const bg = g.createLinearGradient(0, 0, W, H);
+    bg.addColorStop(0, '#cfd6c2'); bg.addColorStop(0.5, '#dfe2cf'); bg.addColorStop(1, '#c6cfb9');
+    g.fillStyle = bg; g.fillRect(0, 0, W, H);
+    g.lineWidth = 1;
+    for (let k = 0; k < 30; k++) {                 // guilloche
+      g.strokeStyle = `rgba(60,100,72,${0.1 + rand() * 0.12})`;
+      g.beginPath();
+      for (let x = 0; x <= W; x += 4) {
+        const y = 14 + k * 6.6 + Math.sin(x * 0.05 + k * 0.8) * 4 + Math.sin(x * 0.013 + k) * 3;
+        if (x) g.lineTo(x, y); else g.moveTo(x, y);
+      }
+      g.stroke();
+    }
+    g.strokeStyle = '#55684f'; g.lineWidth = 7; g.strokeRect(8, 8, W - 16, H - 16);
+    g.strokeStyle = 'rgba(70,92,66,0.7)'; g.lineWidth = 2; g.strokeRect(19, 19, W - 38, H - 38);
+    const cx = W * 0.52, cy = H * 0.5;             // portrait medallion
+    g.fillStyle = '#aeb9a1'; g.beginPath(); g.ellipse(cx, cy, 56, 76, 0, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = '#46573f'; g.lineWidth = 5; g.stroke();
+    g.fillStyle = '#4d5c47';
+    g.beginPath(); g.ellipse(cx, cy - 12, 21, 27, 0, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.ellipse(cx, cy + 58, 44, 40, 0, Math.PI, 2 * Math.PI); g.fill();
+    g.fillStyle = 'rgba(48,92,186,0.85)'; g.fillRect(W * 0.33, 10, 11, H - 20);
+    g.fillStyle = '#a8713f'; g.beginPath(); g.ellipse(W * 0.75, H * 0.56, 20, 24, 0, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#3b4a39'; g.font = 'bold 32px "Arial Black", Impact, "DejaVu Sans", sans-serif';
+    g.textBaseline = 'top'; g.textAlign = 'left'; g.fillText('100', 28, 26);
+    g.textAlign = 'right'; g.fillText('100', W - 28, 26);
+    g.textBaseline = 'bottom'; g.textAlign = 'left'; g.fillText('100', 28, H - 24);
+    g.fillStyle = '#95653a'; g.font = 'bold 58px "Arial Black", Impact, "DejaVu Sans", sans-serif';
+    g.textAlign = 'right'; g.fillText('100', W - 24, H - 18);
+    g.fillStyle = 'rgba(45,58,44,0.8)';
+    g.fillRect(W * 0.22, 32, W * 0.5, 6); g.fillRect(W * 0.3, H - 44, W * 0.36, 5);
+    g.fillStyle = '#2f6e48'; g.font = '15px "DejaVu Sans Mono", monospace'; g.textBaseline = 'middle';
+    g.textAlign = 'left'; g.fillText('KB 07734615 A', 34, H * 0.36);
+    g.textAlign = 'right'; g.fillText('KB 07734615 A', W - 34, H * 0.64);
+  }));
+}
+// planar UVs over a bundle: u along the note, v across it (principal axes of the vertices)
+function bundleUV(mesh, toRoot, flip) {
+  const pos = mesh.geometry.attributes.position, n = pos.count;
+  const m = toRoot.clone().multiply(mesh.matrixWorld);
+  const pts = [], c = new THREE.Vector3();
+  for (let i = 0; i < n; i++) { const p = new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(m); pts.push(p); c.add(p); }
+  c.divideScalar(n);
+  const C = new Array(9).fill(0);
+  for (const p of pts) {
+    const d = [p.x - c.x, p.y - c.y, p.z - c.z];
+    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) C[a * 3 + b] += d[a] * d[b];
+  }
+  const M = new THREE.Matrix3().fromArray(C);
+  const e1 = new THREE.Vector3(0.2, 0.1, 1), e2 = new THREE.Vector3(1, 0.1, 0.2);
+  for (let k = 0; k < 60; k++) {
+    e1.applyMatrix3(M).normalize();
+    e2.applyMatrix3(M); e2.addScaledVector(e1, -e2.dot(e1)).normalize();
+  }
+  if (new THREE.Vector3().crossVectors(e1, e2).y < 0) e2.negate();   // print faces up, not mirrored
+  const proj = pts.map(p => { const d = p.clone().sub(c); return [d.dot(e1), d.dot(e2)]; });
+  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  for (const q of proj) for (let k = 0; k < 2; k++) { lo[k] = Math.min(lo[k], q[k]); hi[k] = Math.max(hi[k], q[k]); }
+  const uv = new Float32Array(n * 2);
+  proj.forEach((q, i) => {
+    const u = (q[0] - lo[0]) / (hi[0] - lo[0]), v = (q[1] - lo[1]) / (hi[1] - lo[1]);
+    uv[i * 2] = flip ? 1 - u : u; uv[i * 2 + 1] = flip ? 1 - v : v;
+  });
+  mesh.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
+function dressBriefcase(root) {
+  root.updateMatrixWorld(true);
+  const toRoot = root.matrixWorld.clone().invert();
+  const notes = new THREE.MeshStandardMaterial({ map: banknoteTexture(), vertexColors: true, roughness: 0.8, metalness: 0, envMapIntensity: 0.6, side: THREE.DoubleSide });
+  notes.onBeforeCompile = sh => {
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <map_fragment>', '')
+      .replace('#include <color_fragment>', /* glsl */`
+        // printed note, except where the vertex colours paint the yellow paper straps
+        float strap = smoothstep(0.12, 0.26, vColor.r - vColor.b);
+        vec3 note = texture2D(map, vMapUv).rgb * mix(vec3(1.0), vColor.rgb, 0.3);
+        diffuseColor.rgb *= mix(note, vColor.rgb, strap);`);
+  };
+  notes.customProgramCacheKey = () => 'banknotes';
+  const leather = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0, envMapIntensity: 0.8, side: THREE.DoubleSide });
+  const lining = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0, side: THREE.DoubleSide });
+  const metal = new THREE.MeshStandardMaterial({ color: 0xc9ced6, roughness: 0.28, metalness: 1, envMapIntensity: 1.2, side: THREE.DoubleSide });
+  let k = 0;
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    if (o.name.startsWith('node_id3')) { bundleUV(o, toRoot, k++ % 2 === 1); o.material = notes; }  // cash bundles
+    else if (/^Layer_[56]/.test(o.name)) o.material = metal;                                         // hinge, latches
+    else if (o.name === 'Layer_2__0_2' || o.name.startsWith('Layer_4')) o.material = lining;         // inside
+    else o.material = leather;                                                                       // shell, lid, handle
+  });
+}
 const cash = rigModel(cashGltf.scene, 'x', CASE_LENGTH);
 scene.add(cash);
+dressBriefcase(cashGltf.scene);
 
 // Rests `obj` on the hood: samples the hood under its footprint, fits a plane
 // and lifts it clear of the highest sample. The opening faces the camera.
@@ -918,12 +1036,12 @@ function boltGeometry(boltSeed, H) {
     }
   }
   const main = path([0, 0], [(rand() - 0.5) * H * 0.35, -H], 0.42, 7);
-  ribbon(main, 26, 16, 1, 0.8);
-  for (let b = 0; b < 5; b++) {
+  ribbon(main, 36, 20, 1, 0.8);
+  for (let b = 0; b < 7; b++) {
     const i = Math.floor(main.length * (0.12 + rand() * 0.6));
     const a = main[i], dir = rand() < 0.5 ? -1 : 1, L = H * (0.15 + rand() * 0.25);
     const br = path(a, [a[0] + dir * L * (0.4 + rand() * 0.5), a[1] - L], 0.5, 5);
-    ribbon(br, 14, 4, 0.7, 0.1);
+    ribbon(br, 16, 4, 0.8, 0.15);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -932,7 +1050,8 @@ function boltGeometry(boltSeed, H) {
   geo.setIndex(idx);
   return geo;
 }
-const bolts = [[FLASH_DIRS[0], 911], [FLASH_DIRS[1], 4242]].map(([dir, sd]) => {
+// seeds chosen so the main channel crosses the open sky right of the towers in the default framing
+const bolts = [[FLASH_DIRS[0], 6802], [FLASH_DIRS[1], 2468]].map(([dir, sd]) => {
   const mat = new THREE.ShaderMaterial({
     uniforms: { uI: { value: 0 } },
     vertexShader: /* glsl */`
@@ -942,15 +1061,15 @@ const bolts = [[FLASH_DIRS[0], 911], [FLASH_DIRS[1], 4242]].map(([dir, sd]) => {
       uniform float uI; varying vec2 vUv; varying float vG;
       void main() {
         float x = abs(vUv.y * 2.0 - 1.0);
-        float core = smoothstep(0.32, 0.0, x);
-        float halo = pow(1.0 - x, 3.0);
-        gl_FragColor = vec4(vec3(0.72, 0.83, 1.0) * (core * 7.0 + halo * 0.9) * vG * uI, 1.0);
+        float core = smoothstep(0.45, 0.0, x);
+        float halo = pow(1.0 - x, 2.0);
+        gl_FragColor = vec4(vec3(0.72, 0.83, 1.0) * (core * 6.0 + halo * 0.9) * vG * uI, 1.0);
       }`,
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
   });
-  const mesh = new THREE.Mesh(boltGeometry(sd, 640), mat);
-  // top hidden in the clouds, bottom just above the far horizon
-  mesh.position.set(dir.x, 0, dir.z).normalize().multiplyScalar(900).setY(660);
+  const mesh = new THREE.Mesh(boltGeometry(sd, 470), mat);
+  // top just above the frame, lower part behind the podium
+  mesh.position.set(dir.x, 0, dir.z).normalize().multiplyScalar(900).setY(490);
   mesh.lookAt(0, mesh.position.y, 0);
   mesh.frustumCulled = false;
   mesh.visible = false;
@@ -974,6 +1093,17 @@ function lightningAt(T) {
   return out;
 }
 
+// glitch strength 0..1 from the scripted bursts; stutters on and off inside a burst
+function glitchAt(T) {
+  const tt = ((T % DURATION) + DURATION) % DURATION;
+  let g = 0;
+  for (const b of GLITCHES) {
+    const dt = tt - b.t;
+    if (dt >= 0 && dt <= b.d) g = Math.max(g, b.p * (Math.floor(dt * 45) % 3 === 1 ? 0.3 : 1));
+  }
+  return g;
+}
+
 /* =====================================================================
    Post-processing (4x MSAA in the composer: the canvas antialias flag
    does not apply to the composer's own render targets)
@@ -985,27 +1115,37 @@ const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.in
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 const grade = new ShaderPass({
-  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uRes: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) } },
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uGlitch: { value: 0 }, uFlash: { value: 0 }, uRes: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: /* glsl */`
-    uniform sampler2D tDiffuse; uniform float uTime; uniform vec2 uRes; varying vec2 vUv;
+    uniform sampler2D tDiffuse; uniform float uTime; uniform float uGlitch; uniform float uFlash; uniform vec2 uRes; varying vec2 vUv;
     float rnd(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
     void main() {
-      vec2 d = vUv - 0.5;
-      // gentle lens dispersion toward the edges
-      vec2 ca = d * dot(d, d) * 0.006;
-      vec3 c = vec3(texture2D(tDiffuse, vUv + ca).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv - ca).b);
+      // glitch: during bursts thin horizontal slices slip sideways and the RGB split widens;
+      // a faint split and a slow rolling band stay on all the time
+      float tick = floor(uTime * 24.0);
+      float rowA = floor(vUv.y * 72.0), rowB = floor(vUv.y * 19.0);
+      float slip = max(step(1.0 - 0.2 * uGlitch, rnd(vec2(rowA, tick))), step(1.0 - 0.08 * uGlitch, rnd(vec2(rowB, tick + 17.0))));
+      vec2 uv = vUv + vec2((rnd(vec2(rowA + rowB * 3.0, tick + 5.0)) - 0.5) * 0.005 * slip * uGlitch, 0.0);
+      vec2 d = uv - 0.5;
+      // gentle lens dispersion toward the edges, plus the glitch split
+      vec2 ca = d * dot(d, d) * 0.006 + vec2((0.0004 + 0.0011 * uGlitch) * (0.7 + 0.6 * rnd(vec2(tick, 3.0))), 0.0);
+      vec3 c = vec3(texture2D(tDiffuse, uv + ca).r, texture2D(tDiffuse, uv).g, texture2D(tDiffuse, uv - ca).b);
       // soft diffusion: lift highlights with a small blur (pro-mist look)
       vec2 px = 1.5 / uRes;
-      vec3 blur = (texture2D(tDiffuse, vUv + vec2(px.x, 0.0)).rgb + texture2D(tDiffuse, vUv - vec2(px.x, 0.0)).rgb +
-                   texture2D(tDiffuse, vUv + vec2(0.0, px.y)).rgb + texture2D(tDiffuse, vUv - vec2(0.0, px.y)).rgb) * 0.25;
+      vec3 blur = (texture2D(tDiffuse, uv + vec2(px.x, 0.0)).rgb + texture2D(tDiffuse, uv - vec2(px.x, 0.0)).rgb +
+                   texture2D(tDiffuse, uv + vec2(0.0, px.y)).rgb + texture2D(tDiffuse, uv - vec2(0.0, px.y)).rgb) * 0.25;
       c = mix(c, max(c, blur), 0.35);
       float l = dot(c, vec3(0.299, 0.587, 0.114));
       c = mix(c, c * vec3(0.93, 0.98, 1.06), 0.7);
       c += vec3(0.008, 0.014, 0.03) * (1.0 - l);
       c = (c - 0.5) * 1.05 + 0.5;
+      float band = exp(-pow((fract(vUv.y + uTime * 0.1) - 0.5) * 18.0, 2.0));
+      c *= 1.0 + 0.02 * band - 0.03 * uGlitch * rnd(vec2(tick, 9.0));
+      d = vUv - 0.5;
       d.x *= uRes.x / uRes.y;
-      c *= mix(0.6, 1.0, smoothstep(0.95, 0.3, length(d)));
+      // the vignette opens up while lightning flashes, so a strike in the corner reads
+      c *= mix(mix(0.55, 1.0, smoothstep(0.95, 0.3, length(d))), 1.0, 0.5 * uFlash);
       c += (rnd(vUv * uRes + fract(uTime) * 91.0) - 0.5) * 0.022;
       gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
     }`,
@@ -1015,14 +1155,38 @@ composer.addPass(grade);
 /* =====================================================================
    Camera path
    ===================================================================== */
-const camPosCurve = new THREE.CatmullRomCurve3(CAM_KEYS.map(k => new THREE.Vector3(...k.pos)), false, 'centripetal');
-const camTgtCurve = new THREE.CatmullRomCurve3(CAM_KEYS.map(k => new THREE.Vector3(...k.target)), false, 'centripetal');
-const easeInOut = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+// views blend as position + yaw/pitch/distance, so the turn is even and never rolls
+function viewOf(k) {
+  const pos = new THREE.Vector3(...k.pos), d = new THREE.Vector3(...k.target).sub(pos), dist = d.length();
+  return { pos, dist, zoom: k.zoom, yaw: Math.atan2(d.x, -d.z), pitch: Math.asin(d.y / dist) };
+}
+const VIEW_HOME = viewOf(CAM_HOME), VIEW_PLATE = viewOf(CAM_PLATE);
+const smoother = x => x * x * x * (x * (x * 6 - 15) + 10);    // zero speed and acceleration at both ends
+function pushAt(t) {
+  const [a, b] = CAM_MOVE.in, [c, e] = CAM_MOVE.out;
+  if (t <= a || t >= e) return 0;
+  if (t < b) return smoother((t - a) / (b - a));
+  if (t <= c) return 1;
+  return 1 - smoother((t - c) / (e - c));
+}
+const shake = (t, parts) => parts.reduce((s, [k, a, ph]) => s + a * Math.sin(2 * Math.PI * k * t / DURATION + ph), 0);
+function setZoom(z) {
+  if (Math.abs(camera.zoom - z) < 1e-5) return;
+  camera.zoom = z;
+  applyProjection();
+}
+const lookDir = new THREE.Vector3();
 function cameraAt(t) {
-  const u = easeInOut(THREE.MathUtils.clamp(t / DURATION, 0, 1));
-  camPosCurve.getPoint(u, camera.position);
-  camTgtCurve.getPoint(u, controls.target);
+  const s = pushAt(t), lerp = THREE.MathUtils.lerp;
+  const yaw = lerp(VIEW_HOME.yaw, VIEW_PLATE.yaw, s), pitch = lerp(VIEW_HOME.pitch, VIEW_PLATE.pitch, s);
+  camera.position.lerpVectors(VIEW_HOME.pos, VIEW_PLATE.pos, s);
+  lookDir.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+  controls.target.copy(camera.position).addScaledVector(lookDir, lerp(VIEW_HOME.dist, VIEW_PLATE.dist, s));
   camera.lookAt(controls.target);
+  camera.rotateY(shake(t, SHAKE.yaw));
+  camera.rotateX(shake(t, SHAKE.pitch));
+  camera.rotateZ(shake(t, SHAKE.roll));
+  setZoom(lerp(VIEW_HOME.zoom, VIEW_PLATE.zoom, s));
 }
 
 /* =====================================================================
@@ -1045,6 +1209,7 @@ const ui = {
   play: document.getElementById('play'), scrub: document.getElementById('scrub'),
   time: document.getElementById('time'), mode: document.getElementById('mode'), copy: document.getElementById('copy'),
 };
+ui.scrub.max = DURATION;
 function setPlaying(p) { playing = p; ui.play.textContent = p ? '❚❚' : '▶'; }
 function setAnimCam(a) {
   animCam = a;
@@ -1057,7 +1222,7 @@ ui.mode.onclick = () => setAnimCam(!animCam);
 ui.scrub.oninput = () => { T = +ui.scrub.value; setPlaying(false); if (!animCam) setAnimCam(true); };
 ui.copy.onclick = () => {
   const f = v => v.toArray().map(x => +x.toFixed(2));
-  const s = JSON.stringify({ t: +(T % DURATION).toFixed(2), pos: f(camera.position), target: f(controls.target) });
+  const s = JSON.stringify({ t: +(T % DURATION).toFixed(2), pos: f(camera.position), target: f(controls.target), zoom: +camera.zoom.toFixed(3) });
   navigator.clipboard?.writeText(s);
   ui.copy.textContent = '✓ скопировано';
   setTimeout(() => { ui.copy.textContent = '📋 ракурс'; }, 1200);
@@ -1071,12 +1236,13 @@ window.addEventListener('keydown', e => {
     setAnimCam(false);
     // flush pending damping inertia, then restore the original framing
     controls.enableDamping = false; controls.update();
+    setZoom(1);
     camera.position.copy(CAM_POS); controls.target.copy(CAM_TARGET); controls.update();
     controls.enableDamping = true;
   }
 });
 
-const baseHemi = hemi.intensity, baseEnv = scene.environmentIntensity;
+const baseHemi = hemi.intensity, baseEnv = scene.environmentIntensity, baseBloom = bloom.strength;
 function renderAt(t) {
   skyUniforms.uTime.value = t;
   grade.uniforms.uTime.value = t;
@@ -1090,10 +1256,14 @@ function renderAt(t) {
   skyUniforms.uFlash.value = f;
   skyUniforms.uFlashDir.value.copy(FLASH_DIRS[di]);
   strikeLight.position.copy(FLASH_DIRS[di]).multiplyScalar(60);
-  strikeLight.intensity = f * 1.7;
-  hemi.intensity = baseHemi + f * 0.35;
-  scene.environmentIntensity = baseEnv + f * 0.25;
+  strikeLight.intensity = f * 2.4;
+  hemi.intensity = baseHemi + f * 0.45;
+  scene.environmentIntensity = baseEnv + f * 0.3;
+  bloom.strength = baseBloom + Math.min(f, 1) * 0.1;
+  grade.uniforms.uFlash.value = Math.min(f, 1);
   rimFlash.value = f;
+  // scripted glitch bursts, plus a faint jolt with every strike
+  grade.uniforms.uGlitch.value = Math.max(glitchAt(t), Math.min(L.total, 1) * 0.12);
   bolts.forEach((b, i) => { b.material.uniforms.uI.value = L.bolt[i]; b.visible = L.bolt[i] > 0.01; });
 
   if (animCam) cameraAt(((t % DURATION) + DURATION) % DURATION);
